@@ -49,6 +49,46 @@ export function isUploadedUrl(value: string): boolean {
   return /^https:\/\/[^\s<>"']+$/i.test(value.trim());
 }
 
+/** A shortcode from an image's file name: `Party Blob (1).png` becomes `Party_Blob_1`. */
+export function shortcodeFromFilename(filename: string): string {
+  const base = filename.replace(/\.[^.]+$/, '');
+  return base.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'emoji';
+}
+
+/** `base`, or `base_2`, `base_3`... if that's taken. */
+export function uniqueShortcode(base: string, taken: readonly string[]): string {
+  if (!taken.includes(base)) return base;
+  let suffix = 2;
+  while (taken.includes(`${base}_${suffix}`)) suffix += 1;
+  return `${base}_${suffix}`;
+}
+
+/** What's wrong with one shortcode among the rest, or null when it's fine. */
+export function shortcodeProblem(shortcode: string, all: readonly string[]): string | null {
+  const trimmed = shortcode.trim();
+  if (!trimmed) return 'Needs a name';
+  if (!isValidShortcode(trimmed)) return 'Letters, numbers, _ and - only';
+  if (all.filter((other) => other.trim() === trimmed).length > 1) return 'Already used in this pack';
+  return null;
+}
+
+export interface PublishCheckRow {
+  shortcode: string;
+  url: string | null;
+  uploading?: boolean;
+}
+
+/** Why the pack can't be published yet, one reason at a time, or null when it's ready. */
+export function publishBlocker(title: string, rows: readonly PublishCheckRow[]): string | null {
+  if (rows.some((row) => row.uploading)) return 'Waiting for images to finish uploading';
+  const ready = rows.filter((row) => row.url);
+  if (ready.length === 0) return 'Add at least one image';
+  const shortcodes = ready.map((row) => row.shortcode);
+  if (shortcodes.some((shortcode) => shortcodeProblem(shortcode, shortcodes))) return 'Fix the highlighted shortcodes';
+  if (!title.trim()) return 'Give your pack a name';
+  return null;
+}
+
 /**
  * Convert staged emoji into the deduped `EmojiSetDraftRow[]` that
  * `publishEmojiSet` turns into `['emoji', shortcode, url]` tags. Rows with an

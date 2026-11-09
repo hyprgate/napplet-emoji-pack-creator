@@ -3,30 +3,37 @@
   import { resourceImage } from '@hyprgate/utils';
   import { createEmojiSetStore } from '@hyprgate/utils/emoji-sets';
   import {
-    generatePackIdentifier,
-    isValidShortcode,
     buildPackPublishInput,
-    type StagedEmoji,
+    generatePackIdentifier,
+    publishBlocker,
+    shortcodeFromFilename,
+    shortcodeProblem,
+    uniqueShortcode,
   } from './lib/emoji-pack';
-  import { uploadEmojiImage, validateImageFile } from './lib/upload';
+  import { ACCEPTED_IMAGE_TYPES, MAX_EMOJI_BYTES, uploadEmojiImage, validateImageFile } from './lib/upload';
 
-  interface StagedRow extends StagedEmoji {
+  interface StagedRow {
     key: string;
+    shortcode: string;
+    url: string | null;
     name: string;
+    uploading: boolean;
+    error: string | null;
   }
 
   const store = createEmojiSetStore();
 
   let pubkey = $state<string | null>(null);
-  let identifier = $state(generatePackIdentifier());
+  // Never shown: a fresh id per pack is what keeps a new pack from overwriting an old set.
+  let identifier = generatePackIdentifier();
   let title = $state('');
   let staged = $state<StagedRow[]>([]);
-  let pendingShortcode = $state('');
-  let busy = $state(false);
   let publishing = $state(false);
   let status = $state<string | null>(null);
   let error = $state<string | null>(null);
   let fileInput = $state<HTMLInputElement | null>(null);
+  let nextKey = 0;
+  const filesByKey = new Map<string, File>();
 
   $effect(() => {
     void (async () => {
@@ -35,67 +42,66 @@
         pubkey = pk;
         store.init(pk);
       } catch (e) {
-        error = e instanceof Error ? e.message : 'could not load identity';
+        error = e instanceof Error ? e.message : 'Could not load your identity';
       }
     })();
     return () => store.destroy();
   });
 
-  const shortcodeValid = $derived(pendingShortcode.length === 0 || isValidShortcode(pendingShortcode));
-  const shortcodeTaken = $derived(staged.some((row) => row.shortcode === pendingShortcode.trim()));
-  const canPublish = $derived(!publishing && pubkey !== null && staged.length > 0 && title.trim().length > 0);
+  const readyRows = $derived(staged.filter((row) => row.url));
+  const shortcodes = $derived(staged.map((row) => row.shortcode));
+  const blocker = $derived(publishBlocker(title, staged));
+  const canPublish = $derived(!publishing && pubkey !== null && !blocker);
 
-  function regenerateIdentifier(): void {
-    identifier = generatePackIdentifier();
-    status = null;
+  function friendlyUploadError(message: string): string {
+    if (/no server configured/i.test(message)) return 'No media server set up. Add a Blossom server in Settings, then try again.';
+    if (/no signer|readonly|read-only/i.test(message)) return "This session can't sign, so it can't upload. Sign in with a signer to add images.";
+    return message;
   }
 
-  function pickFile(): void {
-    error = null;
-    status = null;
-    const code = pendingShortcode.trim();
-    if (!isValidShortcode(code)) {
-      error = 'enter a valid shortcode (letters, digits, _ or -) before choosing an image';
-      return;
-    }
-    if (shortcodeTaken) {
-      error = `shortcode :${code}: is already staged`;
-      return;
-    }
-    fileInput?.click();
+  function updateRow(key: string, change: Partial<StagedRow>): void {
+    staged = staged.map((row) => (row.key === key ? { ...row, ...change } : row));
   }
 
-  async function onFileChosen(event: Event): Promise<void> {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file) return;
-
-    const code = pendingShortcode.trim();
-    const validation = validateImageFile(file);
-    if (validation) {
-      error = validation;
-      return;
-    }
-
-    busy = true;
-    error = null;
+  async function uploadRow(key: string, file: File): Promise<void> {
+    updateRow(key, { uploading: true, error: null });
     try {
       const outcome = await uploadEmojiImage(file);
-      staged = [
-        ...staged,
-        { key: `${code}-${outcome.sha256 ?? Date.now()}`, shortcode: code, url: outcome.url, name: file.name },
-      ];
-      pendingShortcode = '';
-      status = `Uploaded :${code}:`;
+      updateRow(key, { url: outcome.url, uploading: false });
+      filesByKey.delete(key);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'upload failed';
-    } finally {
-      busy = false;
+      updateRow(key, { uploading: false, error: friendlyUploadError(e instanceof Error ? e.message : 'Upload failed') });
     }
+  }
+
+  async function onFilesChosen(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    input.value = '';
+    error = null;
+    status = null;
+    const uploads: Array<[string, File]> = [];
+    for (const file of files) {
+      const problem = validateImageFile(file);
+      const key = `row-${nextKey++}`;
+      staged = [...staged, {
+        key,
+        shortcode: uniqueShortcode(shortcodeFromFilename(file.name), staged.map((row) => row.shortcode)),
+        url: null,
+        name: file.name,
+        uploading: !problem,
+        error: problem,
+      }];
+      if (!problem) {
+        filesByKey.set(key, file);
+        uploads.push([key, file]);
+      }
+    }
+    for (const [key, file] of uploads) await uploadRow(key, file);
   }
 
   function removeStaged(key: string): void {
+    filesByKey.delete(key);
     staged = staged.filter((row) => row.key !== key);
     status = null;
   }
@@ -103,101 +109,97 @@
   async function publish(): Promise<void> {
     error = null;
     status = null;
-    if (!pubkey) {
-      error = 'not signed in';
-      return;
-    }
     publishing = true;
     try {
-      const input = buildPackPublishInput(title, staged, identifier);
+      const input = buildPackPublishInput(
+        title,
+        readyRows.map((row) => ({ shortcode: row.shortcode, url: row.url! })),
+        identifier,
+      );
       await store.publishEmojiSet(input);
-      status = `Published “${input.title}” (${input.rows.length} emoji) as a new pack`;
-      // Reset for the next pack: a fresh uuid guarantees no overwrite.
+      status = `Published “${input.title}” with ${input.rows.length} emoji. It'll show up in Emoji Sets and Emoji Browser.`;
       staged = [];
       title = '';
       identifier = generatePackIdentifier();
     } catch (e) {
-      error = e instanceof Error ? e.message : 'publish failed';
+      error = `Couldn't publish: ${e instanceof Error ? e.message : 'something went wrong'}. Your images are still here.`;
     } finally {
       publishing = false;
     }
   }
+
+  const acceptedKinds = ACCEPTED_IMAGE_TYPES.map((type) => type.replace('image/', '').replace('+xml', '').toUpperCase()).join(', ');
 </script>
 
 <main>
   <header>
-    <h1>Emoji Pack Creator</h1>
-    <p class="muted">Upload custom images, name them, and publish a new kind&#8209;30030 emoji pack.</p>
+    <h1>Make an emoji pack</h1>
+    <p class="muted">Name it, add your images, and publish. Anyone can then use it.</p>
   </header>
 
-  <section class="meta">
-    <label class="field title-field">
-      <span>Pack title</span>
-      <input
-        type="text"
-        placeholder="e.g. My Reaction Pack"
-        bind:value={title}
-        aria-label="Pack title"
-      />
-    </label>
-    <div class="field">
-      <span>Pack id (d&#8209;tag)</span>
-      <div class="dtag-row">
-        <code class="dtag" aria-label="Pack identifier" title={identifier}>{identifier}</code>
-        <button type="button" class="ghost" onclick={regenerateIdentifier} aria-label="Regenerate pack id">
-          ⟳
-        </button>
-      </div>
-    </div>
+  <section class="step">
+    <h2><span class="step-number">1</span> Name your pack</h2>
+    <input type="text" placeholder="e.g. My reaction pack" bind:value={title} aria-label="Pack name" />
   </section>
-  <p class="hint">A unique id is generated per pack, so publishing never overwrites an existing emoji set.</p>
 
-  <section class="add">
-    <label class="field shortcode-field">
-      <span>Shortcode</span>
-      <input
-        type="text"
-        placeholder="party_blob"
-        bind:value={pendingShortcode}
-        aria-label="Emoji shortcode"
-        class:invalid={!shortcodeValid}
-      />
-    </label>
-    <button
-      type="button"
-      class="primary"
-      onclick={pickFile}
-      disabled={busy || !shortcodeValid || pendingShortcode.trim().length === 0}
-      aria-label="Upload emoji image"
-    >
-      {busy ? 'Uploading…' : '＋ Upload image'}
-    </button>
+  <section class="step images">
+    <div class="step-head">
+      <h2><span class="step-number">2</span> Add images</h2>
+      {#if staged.length > 0}
+        <button type="button" class="ghost" onclick={() => fileInput?.click()}>＋ Add more</button>
+      {/if}
+    </div>
     <input
       bind:this={fileInput}
       type="file"
       accept="image/*"
+      multiple
       class="hidden-file"
       aria-hidden="true"
       tabindex="-1"
-      onchange={onFileChosen}
+      onchange={onFilesChosen}
     />
-  </section>
-  {#if !shortcodeValid}
-    <p class="error">Shortcodes may use letters, digits, underscores, or hyphens only.</p>
-  {/if}
 
-  <section class="staged" aria-label="Staged emoji">
     {#if staged.length === 0}
-      <p class="empty">No emoji yet — add a shortcode and upload an image to stage your first emoji.</p>
+      <button type="button" class="dropzone" onclick={() => fileInput?.click()}>
+        <strong>Choose images</strong>
+        <span class="muted">{acceptedKinds}, up to {MAX_EMOJI_BYTES / (1024 * 1024)} MB each. You can pick several.</span>
+        <span class="muted">File names become shortcodes, and you can change them after.</span>
+      </button>
     {:else}
-      <ul>
+      <ul class="staged" aria-label="Images in this pack">
         {#each staged as row (row.key)}
-          <li class="chip" data-staged-emoji>
-            <img class="preview" alt={`:${row.shortcode}:`} use:resourceImage={row.url} />
-            <span class="code">:{row.shortcode}:</span>
-            <button type="button" class="ghost remove" onclick={() => removeStaged(row.key)} aria-label={`Remove :${row.shortcode}:`}>
-              ✕
-            </button>
+          {@const problem = row.error ? null : shortcodeProblem(row.shortcode, shortcodes)}
+          <li class="card" class:failed={!!row.error} data-staged-emoji>
+            <div class="preview-frame">
+              {#if row.url}
+                <img class="preview" alt={`:${row.shortcode}:`} use:resourceImage={row.url} />
+              {:else if row.uploading}
+                <span class="muted">Uploading...</span>
+              {:else}
+                <span class="muted" aria-hidden="true">!</span>
+              {/if}
+            </div>
+            <button type="button" class="remove" onclick={() => removeStaged(row.key)} aria-label={`Remove ${row.shortcode}`}>×</button>
+            <label class="shortcode">
+              <span class="colon" aria-hidden="true">:</span>
+              <input
+                type="text"
+                value={row.shortcode}
+                aria-label={`Shortcode for ${row.name}`}
+                aria-invalid={!!problem}
+                oninput={(event) => updateRow(row.key, { shortcode: event.currentTarget.value })}
+              />
+              <span class="colon" aria-hidden="true">:</span>
+            </label>
+            {#if row.error}
+              <p class="row-error" role="alert">{row.error}</p>
+              {#if filesByKey.has(row.key)}
+                <button type="button" class="ghost" onclick={() => uploadRow(row.key, filesByKey.get(row.key)!)}>Try again</button>
+              {/if}
+            {:else if problem}
+              <p class="row-error">{problem}</p>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -205,66 +207,103 @@
   </section>
 
   <footer>
-    <button type="button" class="publish" onclick={publish} disabled={!canPublish} aria-label="Publish pack">
-      {publishing ? 'Publishing…' : `Publish pack (${staged.length})`}
+    <div class="message" aria-live="polite">
+      {#if error}<p class="error" role="alert">{error}</p>
+      {:else if status}<p class="ok">{status}</p>
+      {:else if blocker}<p class="muted">{blocker}</p>
+      {:else}<p class="ok">Ready to publish {readyRows.length} emoji.</p>{/if}
+    </div>
+    <button type="button" class="publish" onclick={publish} disabled={!canPublish}>
+      {publishing ? 'Publishing...' : `Publish pack (${readyRows.length})`}
     </button>
-    {#if status}<p class="ok" role="status">{status}</p>{/if}
-    {#if error}<p class="error" role="alert">{error}</p>{/if}
   </footer>
 </main>
 
 <style>
+  :global(body) {
+    margin: 0;
+    background: var(--hg-bg-base, #050505);
+  }
+
   main {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 14px;
     height: 100vh;
     box-sizing: border-box;
     padding: 14px;
     color: var(--hg-text-primary, #f2efe7);
     background: var(--hg-bg-base, #050505);
     font-family: var(--hg-font-body, inherit);
+    font-size: 13px;
   }
 
-  header h1 {
+  h1 {
     margin: 0;
-    font-size: 15px;
+    font-size: 16px;
     font-family: var(--hg-font-title, inherit);
+  }
+
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  p {
+    margin: 0;
   }
 
   .muted {
     color: var(--hg-text-muted, #b8b1a4);
+    font-size: 12px;
+  }
+
+  header .muted {
+    margin-top: 2px;
+  }
+
+  .step {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .images {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .step-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .step-number {
+    display: inline-grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1px solid var(--hg-accent-cyan, #82d8f7);
+    color: var(--hg-accent-cyan, #82d8f7);
     font-size: 11px;
-    margin: 2px 0 0;
-  }
-
-  .meta {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-  }
-
-  .field {
-    display: grid;
-    gap: 3px;
-  }
-
-  .field span {
-    color: var(--hg-text-muted, #b8b1a4);
-    font-size: 10px;
-    text-transform: uppercase;
   }
 
   input[type='text'] {
     min-width: 0;
-    height: 28px;
+    height: 30px;
     padding: 0 8px;
     border: 1px solid var(--hg-border, #303030);
     border-radius: 4px;
     background: var(--hg-surface, #101010);
     color: var(--hg-text-primary, #f2efe7);
     font: inherit;
-    font-size: 12px;
   }
 
   input[type='text']:focus {
@@ -272,156 +311,187 @@
     border-color: var(--hg-accent-cyan, #82d8f7);
   }
 
-  input.invalid {
-    border-color: var(--hg-accent-red, #f78282);
+  input[aria-invalid='true'] {
+    border-color: var(--hg-accent-red, #ff6b6b);
   }
 
-  .dtag-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
+  button {
+    font: inherit;
+    cursor: pointer;
   }
 
-  .dtag {
-    flex: 1;
-    min-width: 0;
-    height: 28px;
-    line-height: 28px;
-    padding: 0 8px;
-    border: 1px solid var(--hg-border-muted, #242424);
-    border-radius: 4px;
-    background: var(--hg-surface, #101010);
-    color: var(--hg-text-muted, #b8b1a4);
-    font-size: 11px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .hint {
-    margin: -4px 0 0;
-    color: var(--hg-text-muted, #b8b1a4);
-    font-size: 10px;
-  }
-
-  .add {
-    display: flex;
-    align-items: flex-end;
-    gap: 8px;
-  }
-
-  .shortcode-field {
-    flex: 1;
+  button:focus-visible {
+    outline: 2px solid var(--hg-accent-cyan, #82d8f7);
+    outline-offset: 1px;
   }
 
   .hidden-file {
     display: none;
   }
 
-  button {
-    cursor: pointer;
-    font: inherit;
+  .ghost {
+    min-height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--hg-border, #303030);
     border-radius: 4px;
-  }
-
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .primary,
-  .publish {
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--hg-accent-cyan, #82d8f7);
     background: var(--hg-surface, #101010);
     color: var(--hg-text-primary, #f2efe7);
     font-size: 12px;
   }
 
-  .publish {
-    align-self: flex-start;
+  .dropzone {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 140px;
+    padding: 20px;
+    border: 1px dashed var(--hg-border, #303030);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--hg-text-primary, #f2efe7);
   }
 
-  .ghost {
-    border: 1px solid var(--hg-border, #303030);
-    background: transparent;
-    color: var(--hg-text-muted, #b8b1a4);
-    height: 24px;
-    min-width: 24px;
-    font-size: 12px;
+  .dropzone strong {
+    color: var(--hg-accent-cyan, #82d8f7);
+    font-size: 14px;
+  }
+
+  .dropzone:hover, .ghost:hover {
+    border-color: var(--hg-accent-cyan, #82d8f7);
   }
 
   .staged {
     flex: 1;
-    min-height: 0;
-    overflow: auto;
-    border: 1px solid var(--hg-border-muted, #242424);
-    border-radius: 6px;
-    padding: 8px;
-  }
-
-  .empty {
-    color: var(--hg-text-muted, #b8b1a4);
-    font-size: 11px;
-    margin: 0;
-  }
-
-  .staged ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    grid-auto-rows: min-content;
     gap: 8px;
+    min-height: 0;
+    margin: 0;
+    padding: 2px;
+    overflow: auto;
+    list-style: none;
   }
 
-  .chip {
-    display: inline-flex;
-    align-items: center;
+  .card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
     gap: 6px;
-    padding: 4px 8px;
+    padding: 8px;
     border: 1px solid var(--hg-border, #303030);
-    border-radius: 14px;
+    border-radius: 6px;
     background: var(--hg-surface, #101010);
   }
 
-  .preview {
-    width: 24px;
-    height: 24px;
-    object-fit: contain;
-    image-rendering: pixelated;
+  .card.failed {
+    border-color: var(--hg-accent-red, #ff6b6b);
   }
 
-  .code {
-    font-size: 11px;
-    color: var(--hg-text-muted, #b8b1a4);
+  .preview-frame {
+    display: grid;
+    place-items: center;
+    height: 72px;
+    border-radius: 4px;
+    background: var(--hg-bg-base, #050505);
+  }
+
+  .preview {
+    width: 56px;
+    height: 56px;
+    object-fit: contain;
   }
 
   .remove {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--hg-border, #303030);
     border-radius: 50%;
-    height: 18px;
-    min-width: 18px;
-    line-height: 1;
-    font-size: 10px;
+    background: var(--hg-surface, #101010);
+    color: var(--hg-text-primary, #f2efe7);
+  }
+
+  .remove:hover {
+    border-color: var(--hg-accent-red, #ff6b6b);
+    color: var(--hg-accent-red, #ff6b6b);
+  }
+
+  .shortcode {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .shortcode input {
+    flex: 1;
+    width: 100%;
+    height: 26px;
+    font-size: 12px;
+  }
+
+  .colon {
+    color: var(--hg-text-muted, #b8b1a4);
+  }
+
+  .row-error {
+    color: var(--hg-accent-red, #ff6b6b);
+    font-size: 11px;
+    overflow-wrap: anywhere;
   }
 
   footer {
     display: flex;
     align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--hg-border, #303030);
+  }
+
+  .message {
+    min-width: 0;
+    font-size: 12px;
+  }
+
+  .publish {
+    flex: none;
+    height: 32px;
+    padding: 0 16px;
+    border: 1px solid var(--hg-accent-green, #9be564);
+    border-radius: 4px;
+    background: var(--hg-surface, #101010);
+    color: var(--hg-accent-green, #9be564);
+  }
+
+  .publish:hover:not(:disabled) {
+    background: var(--hg-accent-green, #9be564);
+    color: var(--hg-bg-base, #050505);
+  }
+
+  .publish:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .ok {
-    color: var(--hg-accent-green, #82f7a0);
-    font-size: 11px;
-    margin: 0;
+    color: var(--hg-accent-green, #9be564);
   }
 
   .error {
-    color: var(--hg-accent-red, #f78282);
-    font-size: 11px;
-    margin: 0;
+    color: var(--hg-accent-red, #ff6b6b);
+  }
+
+  @media (max-width: 520px) {
+    footer {
+      flex-direction: column;
+      align-items: stretch;
+    }
   }
 </style>

@@ -4,51 +4,25 @@
 > Do not push commits to this standalone napplet repository; direct changes are overwritten by Hyprgate's mirror workflow.
 <!-- HYPRGATE NAPPLET MIRROR NOTICE:END -->
 
-# napplet-emoji-pack-creator
+# Emoji Pack Creator
 
-[![CI](https://github.com/hyprgate/napplet-emoji-pack-creator/actions/workflows/ci.yml/badge.svg)](https://github.com/hyprgate/napplet-emoji-pack-creator/actions/workflows/ci.yml)
+Make a NIP-51 **kind 30030** custom emoji pack from your own images. Images upload
+through the shell's NAP-UPLOAD service. Each pack is published under a collision-free
+`emoji-pack-<uuid>` `d`-tag, so a new pack never overwrites an existing emoji set, and
+it shows up in Emoji Browser and Emoji Sets.
 
-Forkable source repository for the Hyprgate built-in napplet currently packaged as `@hyprgate/napp-emoji-pack-creator`.
+The source lives in the Hyprgate monorepo at `napplets/emoji-pack-creator`. The
+standalone `hyprgate/napplet-emoji-pack-creator` repository is a generated, read-only
+mirror, so send changes to [hyprgate/web](https://github.com/hyprgate/web).
 
-Create NIP-51 **kind 30030** custom emoji packs by uploading images through the
-shell's NAP-UPLOAD service. Each pack is published under a collision-free
-`emoji-pack-<uuid>` `d`-tag so a new pack never overwrites an existing emoji set,
-and immediately surfaces in Emoji Browser and Emoji Sets (Manager).
+## Developing
 
-This repository was split from `hyprgate/gui` and is mounted back into the parent checkout as `napplets/emoji-pack-creator`.
-It still expects the parent workspace when built through Hyprgate because shared `@hyprgate/*` packages remain workspace dependencies.
-
-## Parent checkout
+Run these from the root of a Hyprgate checkout so workspace dependencies resolve:
 
 ```bash
-git clone --recurse-submodules git@github.com:hyprgate/gui.git
-cd gui
 pnpm install --frozen-lockfile
-pnpm --filter @hyprgate/napp-emoji-pack-creator build
+pnpm --filter ./napplets/emoji-pack-creator paja        # Kehto Paja plus the Vite dev server
+pnpm --filter ./napplets/emoji-pack-creator test
+pnpm --filter ./napplets/emoji-pack-creator type-check
+pnpm --filter ./napplets/emoji-pack-creator conformance # builds, then checks dist/
 ```
-
-## Paja runtime
-
-```bash
-pnpm --filter @hyprgate/napp-emoji-pack-creator paja
-```
-
-This starts Kehto Paja and the napplet's Vite dev server together, using
-the port configured in `vite.config.ts`.
-
-## Testing
-
-Run these checks from a Hyprgate parent checkout so workspace dependencies resolve:
-
-```bash
-git clone --recurse-submodules git@github.com:hyprgate/gui.git
-cd gui
-pnpm install --frozen-lockfile
-pnpm --filter @hyprgate/napp-emoji-pack-creator conformance
-pnpm --filter @hyprgate/napp-emoji-pack-creator test
-pnpm --filter @hyprgate/napp-emoji-pack-creator build
-```
-
-The `conformance` script builds the napplet and runs `@napplet/conformance-cli` against `dist/`. CI runs the same conformance, unit test, and build checks for every push and pull request.
-
-CI runs from the standalone napplet repository but checks out `hyprgate/gui` to resolve private `workspace:*` packages. Configure `HYPRGATE_GUI_CHECKOUT_TOKEN` with read access to `hyprgate/gui` before enabling GitHub Actions.

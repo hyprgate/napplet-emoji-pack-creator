@@ -7,6 +7,10 @@ import {
   generatePackIdentifier,
   isUploadedUrl,
   isValidShortcode,
+  publishBlocker,
+  shortcodeFromFilename,
+  shortcodeProblem,
+  uniqueShortcode,
 } from './emoji-pack';
 
 describe('generatePackIdentifier', () => {
@@ -103,5 +107,37 @@ describe('buildPackPublishInput', () => {
     const input = buildPackPublishInput('Pack', [{ shortcode: 'wave', url: 'https://b.example/1' }]);
     expect(input.identifier.startsWith(EMOJI_PACK_DTAG_PREFIX)).toBe(true);
     expect(SHORTCODE_RE.test(input.identifier)).toBe(true);
+  });
+});
+
+describe('building a pack from images', () => {
+  it('turns a file name into a valid shortcode', () => {
+    expect(shortcodeFromFilename('party_blob.png')).toBe('party_blob');
+    expect(shortcodeFromFilename('Party Blob (1).final.png')).toBe('Party_Blob_1_final');
+    expect(shortcodeFromFilename('日本語.png')).toBe('emoji');
+    expect(isValidShortcode(shortcodeFromFilename('a b!c.gif'))).toBe(true);
+  });
+
+  it('never suggests a shortcode the pack already has', () => {
+    expect(uniqueShortcode('blob', [])).toBe('blob');
+    expect(uniqueShortcode('blob', ['blob'])).toBe('blob_2');
+    expect(uniqueShortcode('blob', ['blob', 'blob_2'])).toBe('blob_3');
+  });
+
+  it('names what is wrong with a shortcode', () => {
+    expect(shortcodeProblem('blob', ['blob'])).toBeNull();
+    expect(shortcodeProblem('', [''])).toBe('Needs a name');
+    expect(shortcodeProblem('no spaces', ['no spaces'])).toMatch(/only/);
+    expect(shortcodeProblem('blob', ['blob', 'blob'])).toMatch(/Already/);
+  });
+
+  it('says why a pack cannot be published, then clears', () => {
+    const row = { shortcode: 'blob', url: 'https://a.example/b.png' };
+    expect(publishBlocker('Pack', [])).toMatch(/at least one/);
+    expect(publishBlocker('', [row])).toMatch(/name/);
+    expect(publishBlocker('Pack', [row, { shortcode: 'x', url: null, uploading: true }])).toMatch(/uploading/);
+    expect(publishBlocker('Pack', [row, { ...row }])).toMatch(/shortcodes/);
+    expect(publishBlocker('Pack', [row, { shortcode: 'failed', url: null }])).toBeNull();
+    expect(publishBlocker('Pack', [row])).toBeNull();
   });
 });

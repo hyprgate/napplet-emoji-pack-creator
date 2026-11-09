@@ -78,3 +78,26 @@ describe('upload-then-publish flow', () => {
     expect(emojiTags).toEqual([['emoji', 'wave', 'https://blossom.example/wave.png']]);
   });
 });
+
+describe('the URL an uploaded emoji is published with', () => {
+  const file = fakeFile('blob.png', 1024, 'image/png');
+  const blossom = `blossom:${'a'.repeat(64)}.png?xs=cdn.example`;
+
+  it('uses the https URL when the shell reports a blossom URI, which is its default', async () => {
+    const result: UploadResult = { ...uploadOk(blossom), nip94: [['url', 'https://cdn.example/a.png'], ['x', 'a'.repeat(64)]] };
+    const outcome = await uploadEmojiImage(file, async () => result);
+
+    expect(outcome.url).toBe('https://cdn.example/a.png');
+    expect(buildPackPublishInput('Pack', [{ shortcode: 'blob', url: outcome.url }], 'id').rows).toHaveLength(1);
+  });
+
+  it('falls back to the other servers, and fails plainly when no web address exists', async () => {
+    const withFallback: UploadResult = { ...uploadOk(blossom), fallbackUrls: ['https://cdn2.example/a.png'] };
+    expect((await uploadEmojiImage(file, async () => withFallback)).url).toBe('https://cdn2.example/a.png');
+    await expect(uploadEmojiImage(file, async () => uploadOk(blossom))).rejects.toThrow(/web address/);
+  });
+
+  it('leaves an https result alone', async () => {
+    expect((await uploadEmojiImage(file, async () => uploadOk('https://cdn.example/b.png'))).url).toBe('https://cdn.example/b.png');
+  });
+});

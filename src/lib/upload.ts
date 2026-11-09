@@ -46,5 +46,20 @@ export async function uploadEmojiImage(
   if (!result.ok || !result.url) {
     throw new Error(result.error ?? 'upload failed');
   }
-  return { url: result.url, sha256: result.sha256, mimeType: result.mimeType };
+  return { url: fetchableUrl(result), sha256: result.sha256, mimeType: result.mimeType };
+}
+
+/**
+ * The shell can report a `blossom:` URI as the result, but an emoji tag has to be an
+ * image URL other clients can load. Its result always carries the https URL as well.
+ */
+function fetchableUrl(result: UploadResult): string {
+  if (/^https:\/\//i.test(result.url!)) return result.url!;
+  const candidates = [
+    ...(result.nip94 ?? []).filter((tag) => tag[0] === 'url').map((tag) => tag[1]),
+    ...(result.fallbackUrls ?? []),
+  ];
+  const https = candidates.find((candidate) => candidate && /^https:\/\//i.test(candidate));
+  if (!https) throw new Error('The server did not return a web address for this image');
+  return https;
 }
